@@ -1,25 +1,70 @@
-"""Event-driven incoming-message tracking + debounce (settle window).
+"""Event-driven incoming-message tracking + debounce (settle window) + channel event cache.
 
 Lets agents react to new client messages instead of polling. A Telethon
 NewMessage(incoming=True) handler records incoming private (non-bot, non-self)
 messages per chat; the two tools below expose them, with wait_for_settled_message
 debouncing a burst (several messages typed in a row) into a single settled event.
+
+Also caches new messages from monitored channels (folder sources) into a JSON
+file, so get_message_updates can return them without calling get_history.
 """
 
 import asyncio
 import json
 import time
 import logging
+import os
+from pathlib import Path
 from typing import Any, Dict, Optional
+from collections import deque
 
 from telethon import events as _events
 from telethon import utils
 
 from telegram_mcp.runtime import *  # mcp, clients, ToolAnnotations, log_and_format_error
 
+# === Private message debounce (existing) ===
 # chat_id -> {first_ts, last_ts, count, first_id, last_id, name, username}
 _pending_msgs: Dict[int, Dict[str, Any]] = {}
 _activity_event: Optional[asyncio.Event] = None
+
+# === Channel event cache (new) ===
+CACHE_DIR = Path.home() / '.hermes' / 'data' / 'tg_events'
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+CACHE_FILE = CACHE_DIR / 'events.json'
+MAX_CACHE_EVENTS = 10000
+MAX_CACHE_AGE = 24 * 3600  # 24 hours
+
+# Folder sources chat IDs
+FOLDER_CHAT_IDS = {
+    -1001288489154, -1001754906826, -1001391345080, -1001319248631,
+    -1001307778786, -1001279926928, -1001418440636, -1001202159807,
+    -1001827745282, -1001863130748, -1001767686479, -1001747110091,
+    -1001752992242, -1001742369677, -1001708761316, -1001381927809,
+    -1001009232144,
+}
+
+_channel_cache: deque = deque(maxlen=MAX_CACHE_EVENTS)
+
+def _load_cache():
+    if CACHE_FILE.exists():
+        try:
+            data = json.loads(CACHE_FILE.read_text())
+            _channel_cache.extend(data)
+            _prune_cache()
+        except:
+            pass
+
+def _save_cache():
+    CACHE_FILE.write_text(json.dumps(list(_channel_cache), ensure_ascii=False))
+
+def _prune_cache():
+    cutoff = time.time() - MAX_CACHE_AGE
+    while _channel_cache and _channel_cache[0]['ts'] < cutoff:
+        _channel_cache.popleft()
+
+# Load existing cache on import
+_load_cache()
 
 
 def _get_activity_event() -> asyncio.Event:
@@ -63,18 +108,52 @@ async def _on_new_incoming(event) -> None:
         logging.getLogger("telegram_mcp").exception("error in _on_new_incoming")
 
 
-def register_incoming_handlers() -> None:
-    """Attach the incoming-message handler to every configured client.
+async def _on_channel_message(event) -> None:
+    """Cache new messages from monitored channels."""
+    try:
+        chat = await event.get_chat()
+        if not hasattr(chat, 'id'):
+            return
+        chat_id = chat.id
+        if chat_id not in FOLDER_CHAT_IDS:
+            return
+        
+        msg = event.message
+        now = time.time()
+        
+        _channel_cache.append({
+            'id': msg.id,
+            'chat_id': chat_id,
+            'chat_title': getattr(chat, 'title', ''),
+            'username': getattr(chat, 'username', ''),
+            'text': msg.text or '',
+            'ts': msg.date.timestamp() if msg.date else now,
+            'media': bool(msg.media),
+            'has_video': bool(msg.video) if hasattr(msg, 'video') else False,
+            'has_photo': bool(msg.photo) if hasattr(msg, 'photo') else False,
+            'views': getattr(msg, 'views', 0),
+            'forwards': getattr(msg, 'forwards', 0),
+        })
+        
+        _prune_cache()
+        # Save every 20 events
+        if len(_channel_cache) % 20 == 0:
+            _save_cache()
+    except Exception:
+        logging.getLogger("telegram_mcp").exception("error in _on_channel_message")
 
-    Safe to call before clients connect — Telethon registers the handler and
-    delivers events once connected. Called at import time so the package's
-    `import telegram_mcp.tools` registration also wires up the listener.
-    """
+
+def register_incoming_handlers() -> None:
+    """Attach handlers to every configured client."""
     for cl in clients.values():
         try:
             cl.add_event_handler(_on_new_incoming, _events.NewMessage(incoming=True))
         except Exception:
             logging.getLogger("telegram_mcp").exception("failed to register incoming handler")
+        try:
+            cl.add_event_handler(_on_channel_message, _events.NewMessage())
+        except Exception:
+            logging.getLogger("telegram_mcp").exception("failed to register channel handler")
 
 
 @mcp.tool(
@@ -189,8 +268,42 @@ async def wait_for_settled_message(settle_ms: int = 6000, max_wait_ms: int = 500
         return log_and_format_error("wait_for_settled_message", e)
 
 
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Get Message Updates", openWorldHint=True, readOnlyHint=True
+    )
+)
+async def get_message_updates(minutes_offset: int = 60, limit: int = 50) -> str:
+    """
+    Get recent messages from monitored channels (folder sources) without
+    calling get_history for each channel. Uses the event-driven cache that
+    collects new messages in real-time.
+
+    Args:
+        minutes_offset: How many minutes back to look (default 60).
+        limit: Max messages to return (default 50).
+    """
+    try:
+        cutoff = time.time() - minutes_offset * 60
+        results = []
+        for e in reversed(_channel_cache):
+            if e['ts'] < cutoff:
+                break
+            results.append(e)
+            if len(results) >= limit:
+                break
+        return json.dumps(results, ensure_ascii=False)
+    except Exception as e:
+        return log_and_format_error("get_message_updates", e)
+
+
 # Wire up the listener as soon as this module is imported (alongside tool registration).
 register_incoming_handlers()
 
 
-__all__ = ["wait_for_new_message", "wait_for_settled_message", "register_incoming_handlers"]
+__all__ = [
+    "wait_for_new_message",
+    "wait_for_settled_message",
+    "get_message_updates",
+    "register_incoming_handlers",
+]

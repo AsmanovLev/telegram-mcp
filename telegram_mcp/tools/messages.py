@@ -257,6 +257,7 @@ async def send_message(
     chat_id: Union[int, str],
     message: str,
     parse_mode: Optional[str] = None,
+    no_webpage: bool = False,
     account: str = None,
 ) -> str:
     """
@@ -267,11 +268,12 @@ async def send_message(
         parse_mode: Optional formatting mode. Use 'html' for HTML tags (<b>, <i>, <code>, <pre>,
             <a href="...">), 'md' or 'markdown' for Markdown (**bold**, __italic__, `code`,
             ```pre```), or omit for plain text (no formatting).
+        no_webpage: If True, disable link preview in the message.
     """
     try:
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
-        await cl.send_message(entity, message, parse_mode=parse_mode)
+        await cl.send_message(entity, message, parse_mode=parse_mode, link_preview=not no_webpage)
         return "Message sent successfully."
     except Exception as e:
         return log_and_format_error("send_message", e, chat_id=chat_id)
@@ -1034,7 +1036,11 @@ async def forward_messages(
 @with_account(readonly=False)
 @validate_id("chat_id")
 async def edit_message(
-    chat_id: Union[int, str], message_id: int, new_text: str, account: str = None
+    chat_id: Union[int, str],
+    message_id: int,
+    new_text: str,
+    no_webpage: bool = False,
+    account: str = None,
 ) -> str:
     """
     Edit a message you sent.
@@ -1042,7 +1048,7 @@ async def edit_message(
     try:
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
-        await cl.edit_message(entity, message_id, new_text)
+        await cl.edit_message(entity, message_id, new_text, link_preview=not no_webpage)
         return f"Message {message_id} edited."
     except Exception as e:
         return log_and_format_error(
