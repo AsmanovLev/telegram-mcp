@@ -296,11 +296,20 @@ async def get_message_updates(
         if chat_ids:
             filter_chat_ids = set(chat_ids) if filter_chat_ids is None else filter_chat_ids & set(chat_ids)
         
+        # Build normalized set: convert -100XXX format to raw ID for comparison
+        norm_ids = set()
+        for fid in filter_chat_ids:
+            norm_ids.add(fid)
+            # Convert -100XXXXXXXXXX → XXXXXXXXXX (strip -100 prefix)
+            abs_id = abs(fid)
+            if abs_id > 1000000000000:
+                norm_ids.add(abs_id - 1000000000000)
+
         results = []
         for e in reversed(_channel_cache):
             if cutoff and e['ts'] < cutoff:
                 break
-            if filter_chat_ids and e.get('chat_id') not in filter_chat_ids:
+            if filter_chat_ids and e.get('chat_id') not in norm_ids:
                 continue
             results.append(e)
             if len(results) >= limit:
