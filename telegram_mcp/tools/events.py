@@ -41,7 +41,7 @@ FOLDER_CHAT_IDS = {
     -1001307778786, -1001279926928, -1001418440636, -1001202159807,
     -1001827745282, -1001863130748, -1001767686479, -1001747110091,
     -1001752992242, -1001742369677, -1001708761316, -1001381927809,
-    -1001009232144,
+    -1001009232144, -1001607197661,
 }
 
 _channel_cache: deque = deque(maxlen=MAX_CACHE_EVENTS)
@@ -109,22 +109,20 @@ async def _on_new_incoming(event) -> None:
 
 
 async def _on_channel_message(event) -> None:
-    """Cache new messages from monitored channels."""
+    """Cache messages from any chat for later filtering in get_message_updates."""
     try:
         chat = await event.get_chat()
         if not hasattr(chat, 'id'):
             return
-        chat_id = chat.id
-        if chat_id not in FOLDER_CHAT_IDS:
-            return
         
+        chat_id = chat.id
         msg = event.message
         now = time.time()
         
         _channel_cache.append({
             'id': msg.id,
             'chat_id': chat_id,
-            'chat_title': getattr(chat, 'title', ''),
+            'chat_title': getattr(chat, 'title', getattr(chat, 'first_name', str(chat_id))),
             'username': getattr(chat, 'username', ''),
             'text': msg.text or '',
             'ts': msg.date.timestamp() if msg.date else now,
@@ -136,7 +134,6 @@ async def _on_channel_message(event) -> None:
         })
         
         _prune_cache()
-        # Save every 20 events
         if len(_channel_cache) % 20 == 0:
             _save_cache()
     except Exception:
@@ -273,22 +270,38 @@ async def wait_for_settled_message(settle_ms: int = 6000, max_wait_ms: int = 500
         title="Get Message Updates", openWorldHint=True, readOnlyHint=True
     )
 )
-async def get_message_updates(minutes_offset: int = 60, limit: int = 50) -> str:
+async def get_message_updates(
+    minutes_offset: int = 60,
+    limit: int = 50,
+    folder_name: str = None,
+    chat_ids: list = None,
+) -> str:
     """
-    Get recent messages from monitored channels (folder sources) without
-    calling get_history for each channel. Uses the event-driven cache that
-    collects new messages in real-time.
+    Get recent messages from the event-driven cache without calling get_history.
 
     Args:
-        minutes_offset: How many minutes back to look (default 60).
+        minutes_offset: How many minutes back to look (default 60). 0 = no time filter.
         limit: Max messages to return (default 50).
+        folder_name: Filter by folder ('Агрегация', etc.). None = no folder filter.
+        chat_ids: Filter by specific chat IDs. None = no chat filter.
     """
     try:
-        cutoff = time.time() - minutes_offset * 60
+        cutoff = time.time() - minutes_offset * 60 if minutes_offset > 0 else 0
+        
+        # Resolve folder filter to chat IDs
+        filter_chat_ids = None
+        if folder_name:
+            if folder_name == 'Агрегация':
+                filter_chat_ids = FOLDER_CHAT_IDS.copy()
+        if chat_ids:
+            filter_chat_ids = set(chat_ids) if filter_chat_ids is None else filter_chat_ids & set(chat_ids)
+        
         results = []
         for e in reversed(_channel_cache):
-            if e['ts'] < cutoff:
+            if cutoff and e['ts'] < cutoff:
                 break
+            if filter_chat_ids and e.get('chat_id') not in filter_chat_ids:
+                continue
             results.append(e)
             if len(results) >= limit:
                 break

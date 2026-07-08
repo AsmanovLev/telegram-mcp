@@ -1013,6 +1013,9 @@ async def _get_effective_allowed_roots_with_status(
         logger.error(
             "MCP roots request failed; disabling file-path tools for safety.", exc_info=True
         )
+        # Try server fallback even for unexpected errors
+        if fallback_roots and _server_roots_fallback_enabled():
+            return fallback_roots, ROOTS_STATUS_SERVER_FALLBACK
         return [], ROOTS_STATUS_ERROR
 
     client_roots: List[Path] = []

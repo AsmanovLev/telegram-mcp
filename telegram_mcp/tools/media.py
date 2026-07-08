@@ -10,6 +10,8 @@ async def send_file(
     chat_id: Union[int, str],
     file_path: Union[str, List[str]],
     caption: str = None,
+    no_webpage: bool = False,
+    parse_mode: str = None,
     ctx: Optional[Context] = None,
     account: str = None,
 ) -> str:
@@ -20,6 +22,8 @@ async def send_file(
         file_path: Absolute or relative path to the file under allowed roots.
             Pass a list of 2-10 paths to send them as one Telegram media group.
         caption: Optional caption for the file or media group.
+        no_webpage: Disable link previews in caption (default: False).
+        parse_mode: Parse mode for caption ('markdown' or 'html', default: None).
     """
     try:
         if isinstance(file_path, list):
@@ -40,7 +44,7 @@ async def send_file(
         if path_error:
             return path_error
         entity = await resolve_entity(chat_id, cl)
-        await cl.send_file(entity, str(safe_path), caption=caption)
+        await cl.send_file(entity, str(safe_path), caption=caption, parse_mode=parse_mode, link_preview=not no_webpage)
         return f"File sent to chat {chat_id} from {safe_path}."
     except Exception as e:
         return log_and_format_error(
